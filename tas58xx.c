@@ -144,6 +144,8 @@ struct tas58xx_priv {
 
 	int						vol;
 	int						gain;
+	int						volume_left;  /* Per-channel left gain in dB */
+	int						volume_right;  /* Per-channel right gain in dB */
 	int						mixer_l2l;  /* Left to Left mixer gain in dB */
 	int						mixer_r2l;  /* Right to Left mixer gain in dB */
 	int						mixer_l2r;  /* Left to Right mixer gain in dB */
@@ -157,6 +159,7 @@ struct tas58xx_priv {
 	unsigned int			eq_mode;
 	enum tas58xx_eq_mode_type	eq_mode_type;  /* EQ mode type from device tree */
 	unsigned int			crossover_freq;  /* Crossover frequency index */
+	bool					fault_monitor;  /* Enable fault monitoring ALSA controls */
 	bool					is_powered;
 	bool					is_muted;
 	bool					dsp_initialized;
@@ -410,6 +413,33 @@ static void tas58xx_refresh(struct tas58xx_priv *tas58xx)
 		
 		tas58xx_map_db_to_9_23(tas58xx->mixer_r2r, mixer_buf);
 		regmap_bulk_write(rm, TAS5825M_REG_RIGHT_TO_RIGHT_GAIN, mixer_buf, 4);
+	}
+
+	/* Write per-channel volume registers
+	 * Convert dB values to 9.23 fixed-point format and write to volume registers
+	 */
+	if (tas58xx->variant == TAS5805M) {
+		SET_BOOK_AND_PAGE(rm, TAS5805M_BOOK_5, TAS5805M_BOOK_5_VOLUME_PAGE);
+		
+		dev_dbg(&tas58xx->i2c->dev, "%s: channel volumes: Left=%ddB, Right=%ddB\n",
+					__func__, tas58xx->volume_left, tas58xx->volume_right);
+
+		tas58xx_map_db_to_9_23(tas58xx->volume_left, mixer_buf);
+		regmap_bulk_write(rm, TAS5805M_REG_LEFT_VOLUME, mixer_buf, 4);
+		
+		tas58xx_map_db_to_9_23(tas58xx->volume_right, mixer_buf);
+		regmap_bulk_write(rm, TAS5805M_REG_RIGHT_VOLUME, mixer_buf, 4);
+	} else if (tas58xx->variant == TAS5825M) {
+		SET_BOOK_AND_PAGE(rm, TAS5825M_BOOK_5, TAS5825M_BOOK_5_VOLUME_PAGE);
+		
+		dev_dbg(&tas58xx->i2c->dev, "%s: channel volumes: Left=%ddB, Right=%ddB\n",
+					__func__, tas58xx->volume_left, tas58xx->volume_right);
+
+		tas58xx_map_db_to_9_23(tas58xx->volume_left, mixer_buf);
+		regmap_bulk_write(rm, TAS5825M_REG_LEFT_VOLUME, mixer_buf, 4);
+		
+		tas58xx_map_db_to_9_23(tas58xx->volume_right, mixer_buf);
+		regmap_bulk_write(rm, TAS5825M_REG_RIGHT_VOLUME, mixer_buf, 4);
 	}
 
 	/* Write EQ band registers or apply crossover
@@ -923,6 +953,80 @@ static int tas58xx_crossover_put(struct snd_kcontrol *kcontrol,
 	return ret;
 }
 
+/* Fault control handlers */
+struct tas58xx_fault_ctrl {
+	unsigned int reg;    /* Register address to read */
+	unsigned int bit;    /* Bit to check */
+};
+
+static int tas58xx_fault_info(struct snd_kcontrol *kcontrol,
+							 struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 1;
+	return 0;
+}
+
+static int tas58xx_fault_get(struct snd_kcontrol *kcontrol,
+							 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct tas58xx_priv *tas58xx = snd_soc_component_get_drvdata(component);
+	struct tas58xx_fault_ctrl *ctrl = (struct tas58xx_fault_ctrl *)kcontrol->private_value;
+	unsigned int reg_value = 0;
+
+	if (!tas58xx->is_powered) {
+		/* Device is not powered, return no fault */
+		ucontrol->value.integer.value[0] = 0;
+		return 0;
+	}
+
+	mutex_lock(&tas58xx->lock);
+	
+	/* Read the fault register */
+	regmap_read(tas58xx->regmap, ctrl->reg, &reg_value);
+	
+	/* Check if the specific bit is set */
+	ucontrol->value.integer.value[0] = (reg_value & BIT(ctrl->bit)) ? 1 : 0;
+	
+	mutex_unlock(&tas58xx->lock);
+
+	return 0;
+}
+
+/* Define static fault control structures */
+static struct tas58xx_fault_ctrl fault_ctrl_r_oc = {TAS58XX_REG_CHAN_FAULT, 0};
+static struct tas58xx_fault_ctrl fault_ctrl_l_oc = {TAS58XX_REG_CHAN_FAULT, 1};
+static struct tas58xx_fault_ctrl fault_ctrl_r_dc = {TAS58XX_REG_CHAN_FAULT, 2};
+static struct tas58xx_fault_ctrl fault_ctrl_l_dc = {TAS58XX_REG_CHAN_FAULT, 3};
+static struct tas58xx_fault_ctrl fault_ctrl_pvdd_uv = {TAS58XX_REG_GLOBAL_FAULT1, 0};
+static struct tas58xx_fault_ctrl fault_ctrl_pvdd_ov = {TAS58XX_REG_GLOBAL_FAULT1, 1};
+static struct tas58xx_fault_ctrl fault_ctrl_clock = {TAS58XX_REG_GLOBAL_FAULT1, 2};
+static struct tas58xx_fault_ctrl fault_ctrl_eeprom = {TAS58XX_REG_GLOBAL_FAULT1, 5};
+static struct tas58xx_fault_ctrl fault_ctrl_bq = {TAS58XX_REG_GLOBAL_FAULT1, 6};
+static struct tas58xx_fault_ctrl fault_ctrl_otp = {TAS58XX_REG_GLOBAL_FAULT1, 7};
+static struct tas58xx_fault_ctrl fault_ctrl_ot_sd = {TAS58XX_REG_GLOBAL_FAULT2, 0};
+static struct tas58xx_fault_ctrl fault_ctrl_l_cbc = {TAS58XX_REG_GLOBAL_FAULT2, 1};
+static struct tas58xx_fault_ctrl fault_ctrl_r_cbc = {TAS58XX_REG_GLOBAL_FAULT2, 2};
+static struct tas58xx_fault_ctrl fault_ctrl_ot_112 = {TAS58XX_REG_OT_WARNING, 0};
+static struct tas58xx_fault_ctrl fault_ctrl_ot_122 = {TAS58XX_REG_OT_WARNING, 1};
+static struct tas58xx_fault_ctrl fault_ctrl_ot_134 = {TAS58XX_REG_OT_WARNING, 2};
+static struct tas58xx_fault_ctrl fault_ctrl_ot_146 = {TAS58XX_REG_OT_WARNING, 3};
+static struct tas58xx_fault_ctrl fault_ctrl_r_cbc_w = {TAS58XX_REG_OT_WARNING, 4};
+static struct tas58xx_fault_ctrl fault_ctrl_l_cbc_w = {TAS58XX_REG_OT_WARNING, 5};
+
+#define TAS58XX_FAULT(xname, xctrl) \
+{\
+	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,\
+	.name = xname,\
+	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,\
+	.info = tas58xx_fault_info,\
+	.get = tas58xx_fault_get,\
+	.private_value = (unsigned long)&xctrl,\
+}
+
 /* Mixer mode control handlers */
 static int tas58xx_mixer_mode_info(struct snd_kcontrol *kcontrol,
 								struct snd_ctl_elem_info *uinfo)
@@ -1053,6 +1157,17 @@ static const struct snd_kcontrol_new tas58xx_snd_controls_mixer[] = {
 	TAS58XX_MIXER("Mixer R2R Gain", mixer_r2r),
 };
 
+/* Per-channel volume controls for stereo mode (use same mixer control handlers) */
+static const struct snd_kcontrol_new tas58xx_snd_controls_channel_volume_stereo[] = {
+	TAS58XX_MIXER("Channel Left Gain", volume_left),
+	TAS58XX_MIXER("Channel Right Gain", volume_right),
+};
+
+/* Per-channel volume control for bridge/mono mode (only left channel is used) */
+static const struct snd_kcontrol_new tas58xx_snd_controls_channel_volume_mono[] = {
+	TAS58XX_MIXER("Mono Channel Gain", volume_left),
+};
+
 /* EQ band controls (conditionally registered based on device tree) */
 static const struct snd_kcontrol_new tas58xx_snd_controls_eq_15band[] = {
 	TAS58XX_EQ_BAND("00020 Hz", 0),
@@ -1082,6 +1197,36 @@ static const struct snd_kcontrol_new tas58xx_snd_controls_crossover[] = {
 		.get	= tas58xx_crossover_get,
 		.put	= tas58xx_crossover_put,
 	},
+};
+
+/* Fault monitoring controls (always registered, read-only) */
+static const struct snd_kcontrol_new tas58xx_snd_controls_faults[] = {
+	/* Channel faults */
+	TAS58XX_FAULT("Fault Right Channel OC", fault_ctrl_r_oc),
+	TAS58XX_FAULT("Fault Left Channel OC", fault_ctrl_l_oc),
+	TAS58XX_FAULT("Fault Right Channel DC", fault_ctrl_r_dc),
+	TAS58XX_FAULT("Fault Left Channel DC", fault_ctrl_l_dc),
+	
+	/* Global faults 1 */
+	TAS58XX_FAULT("Fault PVDD Undervoltage", fault_ctrl_pvdd_uv),
+	TAS58XX_FAULT("Fault PVDD Overvoltage", fault_ctrl_pvdd_ov),
+	TAS58XX_FAULT("Fault Clock", fault_ctrl_clock),
+	TAS58XX_FAULT("Fault EEPROM Boot Load", fault_ctrl_eeprom),
+	TAS58XX_FAULT("Fault BQ Write Failed", fault_ctrl_bq),
+	TAS58XX_FAULT("Fault OTP CRC Error", fault_ctrl_otp),
+	
+	/* Global faults 2 */
+	TAS58XX_FAULT("Fault Over Temperature Shutdown", fault_ctrl_ot_sd),
+	TAS58XX_FAULT("Fault Left Channel CBC OC", fault_ctrl_l_cbc),
+	TAS58XX_FAULT("Fault Right Channel CBC OC", fault_ctrl_r_cbc),
+	
+	/* Over temperature warnings */
+	TAS58XX_FAULT("Warning Over Temperature 112C", fault_ctrl_ot_112),
+	TAS58XX_FAULT("Warning Over Temperature 122C", fault_ctrl_ot_122),
+	TAS58XX_FAULT("Warning Over Temperature 134C", fault_ctrl_ot_134),
+	TAS58XX_FAULT("Warning Over Temperature 146C", fault_ctrl_ot_146),
+	TAS58XX_FAULT("Warning Right Channel CBC OC", fault_ctrl_r_cbc_w),
+	TAS58XX_FAULT("Warning Left Channel CBC OC", fault_ctrl_l_cbc_w),
 };
 
 static void send_cfg(struct regmap *rm,
@@ -1538,6 +1683,11 @@ static int tas58xx_i2c_probe(struct i2c_client *i2c)
 		dev_dbg(dev, "%s: Mixer controls enabled (runtime configurable)\n", __func__);
 	}
 
+	/* Initialize per-channel volume to 0dB (always enabled) */
+	tas58xx->volume_left = TAS58XX_MIXER_MAX_DB;  /* 0dB */
+	tas58xx->volume_right = TAS58XX_MIXER_MAX_DB; /* 0dB */
+	dev_dbg(dev, "%s: Per-channel volume controls initialized to 0dB\n", __func__);
+
 	/* Read bridge mode from device tree (default: normal mode)
 	 * 0 = Normal mode (PBTL disabled)
 	 * 1 = Bridge mode (PBTL enabled)
@@ -1549,6 +1699,17 @@ static int tas58xx_i2c_probe(struct i2c_client *i2c)
 		dev_info(dev, "%s: Bridge mode (PBTL) enabled via device tree\n", __func__);
 	} else {
 		dev_dbg(dev, "%s: Normal mode (stereo) enabled (default)\n", __func__);
+	}
+
+	/* Read fault monitoring enable from device tree (default: enabled)
+	 * When enabled, fault monitoring ALSA controls will be available
+	 * Note: In dual-DAC configurations, disable this to reduce control clutter
+	 */
+	tas58xx->fault_monitor = device_property_read_bool(dev, "ti,fault-monitor");
+	if (tas58xx->fault_monitor) {
+		dev_info(dev, "%s: Fault monitoring enabled via device tree\n", __func__);
+	} else {
+		dev_dbg(dev, "%s: Fault monitoring disabled\n", __func__);
 	}
 
 	ret = regulator_enable(tas58xx->pvdd);
@@ -1604,10 +1765,17 @@ static int tas58xx_i2c_probe(struct i2c_client *i2c)
 
 	/* Calculate total number of controls */
 	num_controls = ARRAY_SIZE(tas58xx_snd_controls_base);
+	if (tas58xx->fault_monitor)
+		num_controls += ARRAY_SIZE(tas58xx_snd_controls_faults);
 	if (tas58xx->eq_mode_type != TAS58XX_EQ_MODE_OFF)
 		num_controls += ARRAY_SIZE(tas58xx_snd_controls_eq_toggle);
 	if (!tas58xx->mixer_mode_from_dt)
 		num_controls += ARRAY_SIZE(tas58xx_snd_controls_mixer);
+	/* Add channel volume controls (mono for bridge mode, stereo otherwise) */
+	if (tas58xx->bridge_mode)
+		num_controls += ARRAY_SIZE(tas58xx_snd_controls_channel_volume_mono);
+	else
+		num_controls += ARRAY_SIZE(tas58xx_snd_controls_channel_volume_stereo);
 	if (eq_controls)
 		num_controls += eq_controls_size / sizeof(struct snd_kcontrol_new);
 
@@ -1623,6 +1791,12 @@ static int tas58xx_i2c_probe(struct i2c_client *i2c)
 	memcpy(controls, tas58xx_snd_controls_base, sizeof(tas58xx_snd_controls_base));
 	int offset = ARRAY_SIZE(tas58xx_snd_controls_base);
 
+	/* Add fault monitoring controls if enabled */
+	if (tas58xx->fault_monitor) {
+		memcpy(&controls[offset], tas58xx_snd_controls_faults, sizeof(tas58xx_snd_controls_faults));
+		offset += ARRAY_SIZE(tas58xx_snd_controls_faults);
+	}
+
 	/* Add Equalizer toggle control if EQ mode is not OFF */
 	if (tas58xx->eq_mode_type != TAS58XX_EQ_MODE_OFF) {
 		memcpy(&controls[offset], tas58xx_snd_controls_eq_toggle, sizeof(tas58xx_snd_controls_eq_toggle));
@@ -1633,6 +1807,15 @@ static int tas58xx_i2c_probe(struct i2c_client *i2c)
 	if (!tas58xx->mixer_mode_from_dt) {
 		memcpy(&controls[offset], tas58xx_snd_controls_mixer, sizeof(tas58xx_snd_controls_mixer));
 		offset += ARRAY_SIZE(tas58xx_snd_controls_mixer);
+	}
+
+	/* Add per-channel volume controls (mono for bridge mode, stereo otherwise) */
+	if (tas58xx->bridge_mode) {
+		memcpy(&controls[offset], tas58xx_snd_controls_channel_volume_mono, sizeof(tas58xx_snd_controls_channel_volume_mono));
+		offset += ARRAY_SIZE(tas58xx_snd_controls_channel_volume_mono);
+	} else {
+		memcpy(&controls[offset], tas58xx_snd_controls_channel_volume_stereo, sizeof(tas58xx_snd_controls_channel_volume_stereo));
+		offset += ARRAY_SIZE(tas58xx_snd_controls_channel_volume_stereo);
 	}
 
 	/* Add EQ or crossover controls if applicable */
