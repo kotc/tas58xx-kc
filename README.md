@@ -82,6 +82,13 @@ This configuration:
 
 **Note:** Both TAS5805M and TAS5825M can be used in dual DAC configurations. The driver automatically detects each chip based on its I2C address.
 
+⚠️ Important: Do not enable fault monitoring in dual DAC configurations.
+Fault monitoring is disabled by default in dual DAC mode for good reason. Enabling it
+(via fault_monitor_primary=1 or fault_monitor_secondary=1) causes periodic I2C
+polling that disrupts the shared I2S bus, leading to clock faults, subwoofer dropouts,
+and audible noise on the stereo channels. If you need to diagnose hardware issues,
+enable fault monitoring temporarily in a single DAC configuration instead.
+
 ### Device Tree Properties
 
 The driver supports several device tree properties to configure hardware behavior. These settings are applied at boot and cannot be changed at runtime (for safety and stability):
