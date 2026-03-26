@@ -1,0 +1,96 @@
+// Definitions for Louder Raspberry - Allwinner H3 version
+// dtc -I dts -O dtb -o /boot/overlays/tas58xx.dtbo tas58xx-overlay.dts
+// bash: "sudo dtoverlay tas58xx <i2creg=...> <pdn_gpio=...> <firmware=...> <eq_mode=...> <mixer_mode=...> <bridge_mode=...> <fault_monitor=...>"
+// /boot/config.txt: "dtoverlay=tas58xx<,i2creg=...><,pdn_gpio=...><,firmware=...><,eq_mode=...><,mixer_mode=...><,bridge_mode=...><,fault_monitor=...>"
+// i2creg: TAS5805M@0x2c-0x2f (default 0x2d), TAS5825M@0x4c-0x4f
+// pdn_gpio: GPIO pin number for power down control (default: PD14 -> 110)
+// firmware: DSP config file name (optional)
+// eq_mode: 0=OFF, 1=15-band (default), 2=LF Crossover, 3=HF Crossover
+// mixer_mode: 0=Stereo (default), 1=Mono, 2=Left, 3=Right
+// bridge_mode: 0=off (default), 1=on
+// fault_monitor: 0=off, 1=on (default)
+
+/dts-v1/;
+/plugin/;
+
+/ {
+ compatible = "allwinner,sun8i-h3";
+
+ fragment@0 {
+  target = <&i2s0>;
+  __overlay__ {
+   pinctrl-0 = <&i2s0_pins>;
+   pinctrl-names = "default";
+   status = "okay";
+  };
+ };
+
+ fragment@1 {
+  target = <&i2c0>;
+  __overlay__ {
+   status = "okay";
+   clock-frequency = <400000>;
+   #address-cells = <1>;
+   #size-cells = <0>;
+
+   tas58xx: tas58xx@reg {
+    #sound-dai-cells = <0>;
+    compatible = "ti,tas58xx";
+    reg = <0x2d>;
+    pvdd-supply = <&reg_vcc5v0>;
+    pdn-gpios = <&pio 0 110 0>; /* PD14 */
+
+    /* ti,modulation-mode: 0=BD, 1=1SPW, 2=Hybrid (default) */
+    ti,modulation-mode = <0>;
+
+    /* ti,switching-freq: 0=768K (default), 1=384K, 2=480K, 3=576K */
+    ti,switching-freq = <0>;
+
+    /* ti,eq-mode: 0=OFF, 1=15-band (default), 2=LF Crossover (for subwoofer), 3=HF Crossover */
+    ti,eq-mode = <0>;
+
+    /* ti,bridge-mode: enables PBTL/bridge mode (omit for normal stereo mode) */
+    /* ti,bridge-mode; */
+
+    /* ti,mixer-mode: 0=Stereo (default), 1=Mono, 2=Left, 3=Right */
+    ti,mixer-mode = <0>;
+
+    /* ti,fault-monitor: enables fault monitoring ALSA controls (enabled by default for single DAC) */
+    ti,fault-monitor;
+   };
+  };
+ };
+
+
+ fragment@2 {
+  target-path = "/";
+  __overlay__ {
+   sound_i2s {
+    compatible = "simple-audio-card";
+    simple-audio-card,name = "i2s-tas58xx";
+    simple-audio-card,mclk-fs = <256>;
+    simple-audio-card,format = "i2s";
+    status = "okay";
+
+    simple-audio-card,cpu {
+     sound-dai = <&i2s0>;
+    };
+
+    simple-audio-card,codec {
+     sound-dai = <&tas58xx>;
+    };
+   };
+  };
+ };
+
+ __overrides__ {
+  firmware = <&tas58xx>,"ti,dsp-config-name";
+  i2creg = <&tas58xx>,"reg:<>";
+  pdn_gpio = <&tas58xx>,"pdn-gpios:110";
+  eq_mode = <&tas58xx>,"ti,eq-mode:0";
+  mixer_mode = <&tas58xx>,"ti,mixer-mode:0";
+  bridge_mode = <&tas58xx>,"ti,bridge-mode?";
+  fault_monitor = <&tas58xx>,"ti,fault-monitor?";
+ };
+
+};
