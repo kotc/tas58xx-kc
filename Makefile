@@ -1,14 +1,14 @@
 # Comment/uncomment the appropriate line to select the desired DSP configuration
 # All options are disabled by default.  Enable only ONE.
 
-CFLAGS_tas58xx.o += -g
+#CFLAGS_tas58xx.o += -g
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
 obj-m := tas58xx.o
 # enable to compile with debug messages
-#ccflags-y := -DDEBUG
+#ccflags-y := -DDEBUG=1
 
 all:
 	make -C $(KDIR) M=$(PWD) modules

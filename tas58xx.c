@@ -13,8 +13,6 @@
 //
 // It has been simplified a little and reworked for the 5.x ALSA SoC API.
 
-#define DEBUG
-
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -293,17 +291,595 @@ static void tas58xx_map_db_to_9_23(int db_value, uint8_t buffer[4]) {
     buffer[3] = value & 0xFF;
 }
 
+static int printbinary(char *buf, unsigned long x, int nbits)
+{
+	unsigned long mask = 1UL << (nbits - 1);
+	while (mask != 0) {
+		*buf++ = (mask & x ? '1' : '0');
+		mask >>= 1;
+	}
+	*buf = '\0';
+
+	return nbits;
+}
+
+static void tas58xx_dump_reg(struct tas58xx_priv *tas58xx, struct regmap *rm, unsigned int reg, char *reg_name) {
+	unsigned int rv; unsigned char rv8;
+	char bbuf[32], msg[256];
+
+	regmap_read(rm, reg, &rv);
+	rv8=rv&0xff;
+
+//	printbinary(bbuf, rv, 8);
+//	dev_dbg(&tas58xx->i2c->dev, "%s: 0x%02x %s=0x%02x (0b%s)",
+//		__func__, reg, reg_name, rv, bbuf);
+//	return;
+
+	msg[0]=0;
+	switch(reg) {
+		case TAS58XX_REG_DEVICE_CTRL_1:
+			strcat(msg, "DAMP_MOD: ");
+			switch(rv & 0b11) {
+				case 0b00: strcat(msg, "BD MODE"); break;
+				case 0b01: strcat(msg, "1SPW MODE"); break;
+				case 0b10: strcat(msg, "HYBRID MODE"); break;
+				default: strcat(msg, "?"); break;
+			}
+			strcat(msg, ", DAMP_PBTL: ");
+			switch((rv & (0b1 << 2)) >> 2) {
+				case 0b0: strcat(msg, "BTL"); break;
+				case 0b1: strcat(msg, "PBTL"); break;
+			}
+			strcat(msg, ", FSW_SEL: ");
+			switch((rv & (0b111 << 4)) >> 4) {
+				case 0b000: strcat(msg, "768K"); break;
+				case 0b001: strcat(msg, "384K"); break;
+				case 0b011: strcat(msg, "480K"); break;
+				case 0b100: strcat(msg, "576K"); break;
+				default: strcat(msg, "?"); break;
+			}
+			break;
+
+		case TAS58XX_REG_DEVICE_CTRL_2:
+			strcat(msg, "CTRL_STATE: ");
+			switch(rv & 0b11) {
+				case 0b00: strcat(msg, "Deep Sleep"); break;
+				case 0b01: strcat(msg, "Sleep"); break;
+				case 0b10: strcat(msg, "Hi-Z"); break;
+				case 0b11: strcat(msg, "PLAY"); break;
+			}
+			strcat(msg, ", MUTE: ");
+			switch((rv & (0b1 << 3)) >> 3) {
+				case 0b0: strcat(msg, "Normal volume"); break;
+				case 0b1: strcat(msg, "Mute"); break;
+			}
+			strcat(msg, ", DIS_DSP: ");
+			switch((rv & (0b111 << 4)) >> 4) {
+				case 0b000: strcat(msg, "Normal operation"); break;
+				case 0b001: strcat(msg, "Reset the DSP"); break;
+			}
+			break;
+
+		case TAS58XX_REG_SIG_CH_CTRL:
+			strcat(msg, "FS_MODE: ");
+			switch(rv & 0b1111) {
+				case 0b0000: strcat(msg, "Auto"); break;
+				case 0b0010: strcat(msg, "8KHz"); break;
+				case 0b0100: strcat(msg, "16KHz"); break;
+				case 0b0110: strcat(msg, "32KHz"); break;
+				case 0b1000: strcat(msg, "44.1KHz"); break;
+				case 0b1001: strcat(msg, "48KHz"); break;
+				case 0b1010: strcat(msg, "88.2KHz"); break;
+				case 0b1011: strcat(msg, "96KHz"); break;
+				default: strcat(msg, "?"); break;
+			}
+			strcat(msg, ", BCK_RATIO: ");
+			switch((rv & (0b1 << 4)) >> 4) {
+				case 0b0011: strcat(msg, "32FS"); break;
+				case 0b0101: strcat(msg, "64FS"); break;
+				case 0b0111: strcat(msg, "128FS"); break;
+				case 0b1001: strcat(msg, "256FS"); break;
+				case 0b1011: strcat(msg, "512FS"); break;
+				default: strcat(msg, "?"); break;
+			}
+			break;
+
+		case TAS58XX_REG_CLOCK_DET_CTRL:
+			strcat(msg, "DIS_DET_MISS: ");
+			switch((rv & (0b1 << 2)) >> 2) {
+				case 0b0: strcat(msg, "Reg"); break;
+				case 0b1: strcat(msg, "Ign"); break;
+			}
+			strcat(msg, ", DIS_DET_BCLK: ");
+			switch((rv & (0b1 << 3)) >> 3) {
+				case 0b0: strcat(msg, "Reg"); break;
+				case 0b1: strcat(msg, "Ign"); break;
+			}
+			strcat(msg, ", DIS_DET_FS: ");
+			switch((rv & (0b1 << 4)) >> 4) {
+				case 0b0: strcat(msg, "Reg"); break;
+				case 0b1: strcat(msg, "Ign"); break;
+			}
+			strcat(msg, ", DIS_DET_BCLK_RANGE: ");
+			switch((rv & (0b1 << 5)) >> 5) {
+				case 0b0: strcat(msg, "Reg"); break;
+				case 0b1: strcat(msg, "Ign"); break;
+			}
+			strcat(msg, ", DIS_DET_PLL: ");
+			switch((rv & (0b1 << 6)) >> 6) {
+				case 0b0: strcat(msg, "Reg"); break;
+				case 0b1: strcat(msg, "Ign"); break;
+			}
+			break;
+
+		case TAS58XX_REG_SDOUT_SEL:
+			strcat(msg, "SDOUT_SEL: ");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b0: strcat(msg, "DSP out"); break;
+				case 0b1: strcat(msg, "DSP in"); break;
+			}
+			break;
+
+		case TAS58XX_REG_I2S_CTRL:
+			strcat(msg, "BCK_INV: ");
+			switch((rv & (0b1 << 5)) >> 5) {
+				case 0b0: strcat(msg, "Normal"); break;
+				case 0b1: strcat(msg, "Inverted"); break;
+			}
+			break;
+
+		case TAS58XX_REG_SAP_CTRL1:
+			strcat(msg, "WORD_LENGTH: ");
+			switch(rv & 0b11) {
+				case 0b00: strcat(msg, "16b"); break;
+				case 0b01: strcat(msg, "20b"); break;
+				case 0b10: strcat(msg, "24b"); break;
+				case 0b11: strcat(msg, "32b"); break;
+			}
+			strcat(msg, ", I2S_LRCLK_PULSE: ");
+			switch((rv & (0b1 << 2)) >> 2) {
+				case 0b01: strcat(msg, "LRCLK pulse < 8 SCLK"); break;
+				default: strcat(msg, "?"); break;
+			}
+			strcat(msg, ", DATA_FORMAT: ");
+			switch((rv & (0b11 << 4)) >> 4) {
+				case 0b00: strcat(msg, "I2S"); break;
+				case 0b01: strcat(msg, "TDM/DSP"); break;
+				case 0b10: strcat(msg, "RTJ"); break;
+				case 0b11: strcat(msg, "LTJ"); break;
+			}
+			strcat(msg, ", I2S_SHIFT_MSB: ");
+			switch((rv & (0b1 << 7)) >> 7) {
+				case 0b01: strcat(msg, "1"); break;
+				default: strcat(msg, "0"); break;
+			}
+			break;
+
+		case TAS58XX_REG_SAP_CTRL2:
+			strcat(msg, "I2S_SHIFT_LSB: ");
+			switch(rv8) {
+				case 0b0: strcat(msg, "0 BCK (no offset)"); break;
+				case 0b1: strcat(msg, "1 BCK"); break;
+				case 0b10: strcat(msg, "2 BCK"); break;
+				case 0b11111111: strcat(msg, "512 BCK"); break;
+				default: strcat(msg, "?"); break;
+			}
+			break;
+
+		case TAS58XX_REG_SAP_CTRL3:
+			strcat(msg, "RIGHT_DAC_DPATH: ");
+			switch(rv & 0b11) {
+				case 0b00: strcat(msg, "mute"); break;
+				case 0b01: strcat(msg, "right"); break;
+				case 0b10: strcat(msg, "left"); break;
+				case 0b11: strcat(msg, "reserved"); break;
+			}
+			strcat(msg, ", LEFT_DAC_DPATH: ");
+			switch((rv & (0b11 << 4)) >> 4) {
+				case 0b00: strcat(msg, "mute"); break;
+				case 0b01: strcat(msg, "left"); break;
+				case 0b10: strcat(msg, "right"); break;
+				case 0b11: strcat(msg, "reserved"); break;
+			}
+			break;
+
+		case TAS58XX_REG_FS_MON:
+			strcat(msg, "FS: ");
+			switch(rv & 0b1111) {
+				case 0b0000: strcat(msg, "Error"); break;
+				case 0b0010: strcat(msg, "8KHz"); break;
+				case 0b0100: strcat(msg, "16KHz"); break;
+				case 0b0110: strcat(msg, "32KHz"); break;
+				case 0b1001: strcat(msg, "48KHz"); break;
+				case 0b1011: strcat(msg, "96KHz"); break;
+				default: strcat(msg, "?"); break;
+			}
+			strcat(msg, ", BCLK_RATIO_HIGH: ");
+			switch((rv & (0b11 << 4)) >> 4) {
+				case 0b00: strcat(msg, "00"); break;
+				case 0b01: strcat(msg, "01"); break;
+				case 0b10: strcat(msg, "10"); break;
+				case 0b11: strcat(msg, "11"); break;
+			}
+			break;
+
+		case TAS58XX_REG_CLKDET_STATUS:
+			if(rv8!=0) strcat(msg, "CLKDET_STATUS != 0");
+			break;
+
+		case TAS58XX_REG_DIG_VOL_CTRL:
+			strcat(msg, "PGA: ");
+			if(rv8 == 0b11111111) strcat(msg, "Mute");
+			else {
+				sprintf(bbuf,"%d dB", (240-(rv8*5))/10);
+				strcat(msg, bbuf);
+                        }
+			break;
+
+		case TAS58XX_REG_DIG_VOL_CTRL2:
+			strcat(msg, "PGA_RU_STEP: ");
+			switch(rv & 0b11) {
+				case 0b00: strcat(msg, "1 dB"); break;
+				case 0b01: strcat(msg, "2 dB"); break;
+				case 0b10: strcat(msg, "4 dB"); break;
+				case 0b11: strcat(msg, "0.5 dB"); break;
+			}
+			strcat(msg, ", PGA_RU_SPEED: ");
+			switch((rv & (0b11 << 2)) >> 2) {
+				case 0b00: strcat(msg, "1 FS"); break;
+				case 0b01: strcat(msg, "2 FS"); break;
+				case 0b10: strcat(msg, "4 FS"); break;
+				case 0b11: strcat(msg, "Instant"); break;
+			}
+			strcat(msg, ", PGA_RD_STEP: ");
+			switch((rv & (0b11 << 4)) >> 4) {
+				case 0b00: strcat(msg, "1 dB"); break;
+				case 0b01: strcat(msg, "2 dB"); break;
+				case 0b10: strcat(msg, "4 dB"); break;
+				case 0b11: strcat(msg, "0.5 dB"); break;
+			}
+			strcat(msg, ", PGA_RD_SPEED: ");
+			switch((rv & (0b11 << 6)) >> 6) {
+				case 0b00: strcat(msg, "1 FS"); break;
+				case 0b01: strcat(msg, "2 FS"); break;
+				case 0b10: strcat(msg, "4 FS"); break;
+				case 0b11: strcat(msg, "Instant"); break;
+			}
+			break;
+
+		case TAS58XX_REG_DIG_VOL_CTRL3:
+			strcat(msg, "FAST_RAMP_DOWN_SPEED: ");
+			switch((rv & (0b11 << 4)) >> 4) {
+				case 0b00: strcat(msg, "1 dB"); break;
+				case 0b01: strcat(msg, "2 dB"); break;
+				case 0b10: strcat(msg, "4 dB"); break;
+				case 0b11: strcat(msg, "0.5 dB"); break;
+			}
+			strcat(msg, ", FAST_RAMP_DOWN_SPEED: ");
+			switch((rv & (0b11 << 6)) >> 6) {
+				case 0b00: strcat(msg, "1 FS"); break;
+				case 0b01: strcat(msg, "2 FS"); break;
+				case 0b10: strcat(msg, "4 FS"); break;
+				case 0b11: strcat(msg, "Instant"); break;
+			}
+			break;
+
+		case TAS58XX_REG_AUTO_MUTE_CTRL:
+			strcat(msg, "L: ");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b0: strcat(msg, "0"); break;
+				case 0b1: strcat(msg, "1"); break;
+			}
+			strcat(msg, ", R: ");
+			switch((rv & (0b1 << 1)) >> 1) {
+				case 0b0: strcat(msg, "0"); break;
+				case 0b1: strcat(msg, "1"); break;
+			}
+			strcat(msg, ", ctrl: ");
+			switch((rv & (0b1 << 2)) >> 2) {
+				case 0b0: strcat(msg, "independent"); break;
+				case 0b1: strcat(msg, "only when both"); break;
+			}
+			break;
+
+		case TAS58XX_REG_AUTO_MUTE_TIME:
+			strcat(msg, "(for 96kHz) L: ");
+			switch((rv & (0b111 << 0)) >> 0) {
+				case 0b000: strcat(msg, "11.5 ms"); break;
+				case 0b001: strcat(msg, "53 ms"); break;
+				case 0b010: strcat(msg, "106.5 ms"); break;
+				case 0b011: strcat(msg, "266.5 ms"); break;
+				case 0b100: strcat(msg, "0.535 s"); break;
+				case 0b101: strcat(msg, "1.065 s"); break;
+				case 0b110: strcat(msg, "2.665 s"); break;
+				case 0b111: strcat(msg, "5.33 s"); break;
+			}
+			strcat(msg, ", R: ");
+			switch((rv & (0b111 << 4)) >> 4) {
+				case 0b000: strcat(msg, "11.5 ms"); break;
+				case 0b001: strcat(msg, "53 ms"); break;
+				case 0b010: strcat(msg, "106.5 ms"); break;
+				case 0b011: strcat(msg, "266.5 ms"); break;
+				case 0b100: strcat(msg, "0.535 s"); break;
+				case 0b101: strcat(msg, "1.065 s"); break;
+				case 0b110: strcat(msg, "2.665 s"); break;
+				case 0b111: strcat(msg, "5.33 s"); break;
+			}
+			break;
+
+		case TAS58XX_REG_ANA_CTRL:
+			strcat(msg, "ANA_CTRL: ");
+			switch((rv & (0b11 << 5)) >> 5) {
+				case 0b00: strcat(msg, "80 kHz"); break;
+				case 0b01: strcat(msg, "100 kHz"); break;
+				case 0b10: strcat(msg, "120 kHz"); break;
+				case 0b11: strcat(msg, "175 kHz"); break;
+			}
+			break;
+
+		case TAS58XX_REG_AGAIN:
+			strcat(msg, "ANA_GAIN: ");
+			sprintf(bbuf, "%d dB", -((rv8&0b11111)*5)/10 );
+			strcat(msg, bbuf);
+			break;
+
+		case TAS58XX_REG_DAC_CTRL:
+			strcat(msg, "DEM_SEL: ");
+			switch((rv & (0b11 << 0)) >> 0) {
+				case 0b00: strcat(msg, "Enable"); break;
+				case 0b11: strcat(msg, "Disable"); break;
+				default: strcat(msg, "?"); break;
+			}
+			strcat(msg, ", DITHER: ");
+			switch((rv & (0b111 << 2)) >> 2) {
+				case 0b100: strcat(msg, "-2^-7"); break;
+				case 0b101: strcat(msg, "-2^-8"); break;
+				case 0b110: strcat(msg, "-2^-9"); break;
+				case 0b111: strcat(msg, "-2^-10"); break;
+				case 0b000: strcat(msg, "-2^-13"); break;
+				case 0b001: strcat(msg, "-2^-14"); break;
+				case 0b010: strcat(msg, "-2^-15"); break;
+				case 0b011: strcat(msg, "-2^-16"); break;
+			}
+			strcat(msg, ", DITHER_EN: ");
+			switch((rv & (0b11 << 5)) >> 5) {
+				case 0b00: strcat(msg, "dis both"); break;
+				case 0b01: strcat(msg, "en main, dis sec"); break;
+				case 0b10: strcat(msg, "dis main, en sec"); break;
+				case 0b11: strcat(msg, "en both"); break;
+			}
+			strcat(msg, ", DAC FREQ: ");
+			switch((rv & (0b1 << 7)) >> 7) {
+				case 0b00: strcat(msg, "6.144 MHz"); break;
+				case 0b01: strcat(msg, "3.072 MHz"); break;
+			}
+			break;
+
+		case TAS58XX_REG_ADR_PIN_CTRL:
+			strcat(msg, "ADR is ");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b0: strcat(msg, "input"); break;
+				case 0b1: strcat(msg, "output"); break;
+			}
+			break;
+
+		case TAS58XX_REG_ADR_PIN_CONFIG:
+			strcat(msg, "ADR_PIN_CONFIG: ");
+			switch((rv & (0b11111 << 0)) >> 0) {
+				case 0b00000: strcat(msg, "off (low)"); break;
+				case 0b00011: strcat(msg, "auto mute flag"); break;
+				case 0b00100: strcat(msg, "auto mute flag for left ch"); break;
+				case 0b00101: strcat(msg, "auto mute flag for right ch"); break;
+				case 0b00110: strcat(msg, "clock invalid flag"); break;
+				case 0b01011: strcat(msg, "ADR as FAULTZ output"); break;
+				default: strcat(msg, "?"); break;
+			}
+			break;
+
+		case TAS58XX_REG_DSP_MISC:
+			strcat(msg, "BYPASS CONTROL:");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b1: strcat(msg, " [bp EQ]"); break;
+			}
+			switch((rv & (0b1 << 1)) >> 1) {
+				case 0b1: strcat(msg, " [bp DRC]"); break;
+			}
+			switch((rv & (0b1 << 2)) >> 2) {
+				case 0b1: strcat(msg, " [bp 128 tap FIR]"); break;
+			}
+			switch((rv & (0b1 << 3)) >> 3) {
+				case 0b0: strcat(msg, " [l/r use unique coef]"); break;
+				case 0b1: strcat(msg, " [r will share l coef]"); break;
+			}
+			break;
+
+		case TAS58XX_REG_POWER_STATE:
+			strcat(msg, "STATE_RPT: ");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b00: strcat(msg, "Deep sleep"); break;
+				case 0b01: strcat(msg, "Sleep"); break;
+				case 0b10: strcat(msg, "HIZ"); break;
+				case 0b11: strcat(msg, "Play"); break;
+				default: strcat(msg, "?"); break;
+			}
+			break;
+
+		case TAS58XX_REG_AUTOMUTE_STATE:
+			strcat(msg, "ZERO_LEFT_MON: ");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b0: strcat(msg, "not auto muted"); break;
+				case 0b1: strcat(msg, "auto muted"); break;
+			}
+			strcat(msg, ", ZERO_RIGHT_MON: ");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b0: strcat(msg, "not auto muted"); break;
+				case 0b1: strcat(msg, "auto muted"); break;
+			}
+			break;
+
+		case TAS58XX_REG_PHASE_CTRL:
+			strcat(msg, "RAMP PHASE_SYNC_EN: ");
+			switch((rv & (0b1 << 0)) >> 0) {
+				case 0b0: strcat(msg, "0"); break;
+				case 0b1: strcat(msg, "1"); break;
+			}
+			strcat(msg, ", I2S_SYNC_EN: ");
+			switch((rv & (0b1 << 1)) >> 1) {
+				case 0b0: strcat(msg, "0"); break;
+				case 0b1: strcat(msg, "1"); break;
+			}
+			strcat(msg, ", RAMP_PHASE_SEL: ");
+			switch((rv & (0b11 << 2)) >> 2) {
+				case 0b00: strcat(msg, "phase 0"); break;
+				case 0b01: strcat(msg, "phase 1"); break;
+				case 0b10: strcat(msg, "phase 2"); break;
+				case 0b11: strcat(msg, "phase 3"); break;
+			}
+			break;
+
+		case TAS58XX_REG_SS_CTRL1:
+			sprintf(bbuf,"TRI_CTRL: %d", ((rv & (0b1111 << 0)) >> 0));
+			strcat(msg, bbuf);
+			sprintf(bbuf,", RDM_CTRL: %d", ((rv & (0b111 << 4)) >> 4));
+			strcat(msg, bbuf);
+			break;
+
+		case TAS58XX_REG_SS_CTRL2:
+			sprintf(bbuf,"TM_FREQ_CTRL: %d", 61440000/rv8);
+			strcat(msg, bbuf);
+			break;
+
+		case TAS58XX_REG_SS_CTRL3:
+			sprintf(bbuf,"TM_USTEP_CTRL: %d", ((rv & (0b1111 << 0)) >> 0));
+			strcat(msg, bbuf);
+			sprintf(bbuf,", TM_DSTEP_CTRL: %d", ((rv & (0b1111 << 4)) >> 4));
+			strcat(msg, bbuf);
+			break;
+
+		case TAS58XX_REG_SS_CTRL4:
+			sprintf(bbuf,"TM_PERIOD_BNDR: %d", ((rv & (0b11111 << 0)) >> 0));
+			strcat(msg, bbuf);
+			sprintf(bbuf,", TM_AMP_CTRL: %d", ((rv & (0b11 << 5)) >> 5));
+			strcat(msg, bbuf);
+			break;
+
+		case TAS58XX_REG_CHAN_FAULT:
+			if((rv & (0b1 << 0))) strcat(msg, " [CH1_DC]");
+			if((rv & (0b1 << 1))) strcat(msg, " [CH2_DC]");
+			if((rv & (0b1 << 2))) strcat(msg, " [CH1_OC]");
+			if((rv & (0b1 << 3))) strcat(msg, " [CH1_OC]");
+			break;
+
+		case TAS58XX_REG_GLOBAL_FAULT1:
+			if((rv & (0b1 << 0))) strcat(msg, " [PVDD_UV_I]");
+			if((rv & (0b1 << 1))) strcat(msg, " [PVDD_OV_I]");
+			if((rv & (0b1 << 2))) strcat(msg, " [CLK_FAULT_I]");
+			if((rv & (0b1 << 6))) strcat(msg, " [BQ_WR_ERR]");
+			if((rv & (0b1 << 7))) strcat(msg, " [OTP_CRC_ERR]");
+			break;
+
+		case TAS58XX_REG_GLOBAL_FAULT2:
+			if((rv & (0b1 << 0))) strcat(msg, " [OTSD_I]");
+			break;
+
+		case TAS58XX_REG_OT_WARNING:
+			if((rv & (0b1 << 2))) strcat(msg, " [OT_135C]");
+			break;
+
+		case TAS58XX_REG_PIN_CONTROL1:
+			if((rv & (0b1 << 0))) strcat(msg, " [Mask OTSD]");
+			if((rv & (0b1 << 1))) strcat(msg, " [Mask DVDD UV]");
+			if((rv & (0b1 << 2))) strcat(msg, " [Mask DVDD OV]");
+			if((rv & (0b1 << 3))) strcat(msg, " [Mask clock fault]");
+			if((rv & (0b1 << 4))) strcat(msg, " [Mask PVDD UV]");
+			if((rv & (0b1 << 5))) strcat(msg, " [Mask PVDD OV]");
+			if((rv & (0b1 << 6))) strcat(msg, " [Mask DC fault]");
+			if((rv & (0b1 << 7))) strcat(msg, " [Mask OC fault]");
+			break;
+
+		case TAS58XX_REG_PIN_CONTROL2:
+			if((rv & (0b1 << 2))) strcat(msg, " [Mask OT warn]");
+			if((rv & (0b1 << 3))) strcat(msg, " [En OT warn latch]");
+			if((rv & (0b1 << 4))) strcat(msg, " [En OTSD warn latch]");
+			if((rv & (0b1 << 5))) strcat(msg, " [En clock fault latch]");
+			break;
+
+		case TAS58XX_REG_MISC_CONTROL:
+			if((rv & (0b1 << 4))) strcat(msg, " [OTSD auto recovery]");
+			if((rv & (0b1 << 7))) strcat(msg, " [latch clock det st]");
+			break;
+
+	}
+
+	printbinary(bbuf, rv, 8);
+	dev_dbg(&tas58xx->i2c->dev, "0x%02x = 0b%s %s%s%s",
+		reg, bbuf, reg_name, (msg[0]!=0?" :: ":""), msg);
+}
+
+static void tas58xx_dump_regs(struct tas58xx_priv *tas58xx) {
+#if !defined(DEBUG) || (DEBUG<2)
+	return;
+#endif
+	struct regmap *rm = tas58xx->regmap;
+	SET_BOOK_AND_PAGE(rm, TAS58XX_BOOK_CONTROL_PORT, TAS58XX_REG_PAGE_0);
+
+	dev_dbg(&tas58xx->i2c->dev, "%s:", __func__);
+
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DEVICE_CTRL_1, "DEVICE_CTRL_1");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DEVICE_CTRL_2, "DEVICE_CTRL_2");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SIG_CH_CTRL, "SIG_CH_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_CLOCK_DET_CTRL, "CLOCK_DET_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SDOUT_SEL, "SDOUT_SEL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_I2S_CTRL, "I2S_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SAP_CTRL1, "SAP_CTRL1");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SAP_CTRL2, "SAP_CTRL2");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SAP_CTRL3, "SAP_CTRL3");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_FS_MON, "FS_MON");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_BCK_MON, "BCK_MON");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_CLKDET_STATUS, "CLKDET_STATUS");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DIG_VOL_CTRL, "DIG_VOL_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DIG_VOL_CTRL2, "DIG_VOL_CTRL2");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DIG_VOL_CTRL3, "DIG_VOL_CTRL3");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_AUTO_MUTE_CTRL, "AUTO_MUTE_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_AUTO_MUTE_TIME, "AUTO_MUTE_TIME");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_ANA_CTRL, "ANA_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_AGAIN, "AGAIN");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DAC_CTRL, "DAC_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_ADR_PIN_CTRL, "ADR_PIN_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_ADR_PIN_CONFIG, "ADR_PIN_CONFIG");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DSP_MISC, "DSP_MISC");
+//	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_DIE_ID, "DIE_ID");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_POWER_STATE, "POWER_STATE");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_AUTOMUTE_STATE, "AUTOMUTE_STATE");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_PHASE_CTRL, "PHASE_CTRL");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SS_CTRL0, "SS_CTRL0");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SS_CTRL1, "SS_CTRL1");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SS_CTRL2, "SS_CTRL2");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SS_CTRL3, "SS_CTRL3");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_SS_CTRL4, "SS_CTRL4");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_CHAN_FAULT, "CHAN_FAULT");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_GLOBAL_FAULT1, "GLOBAL_FAULT1");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_GLOBAL_FAULT2, "GLOBAL_FAULT2");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_OT_WARNING, "OT_WARNING");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_PIN_CONTROL1, "PIN_CONTROL1");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_PIN_CONTROL2, "PIN_CONTROL2");
+	tas58xx_dump_reg(tas58xx, rm, TAS58XX_REG_MISC_CONTROL, "MISC_CONTROL");
+}
+
 static void tas58xx_refresh(struct tas58xx_priv *tas58xx)
 {
-	unsigned int chan, global1, global2, ot_warning;
+	unsigned int chan, global1, global2, ot_warning, t=0;
 	struct regmap *rm = tas58xx->regmap;
 	int db_value = 24 - (tas58xx->vol / 2);  /* 0x00=+24dB, each step is 0.5dB */
 	int db_gain = -(tas58xx->gain / 2);      /* TAS58XX_AGAIN_MAX=0dB, TAS58XX_AGAIN_MIN=-15.5dB, each step is -0.5dB */
 
-	dev_dbg(&tas58xx->i2c->dev, "%s: is_muted=%d, vol=0x%02x (%ddB), gain=0x%02x (%ddB)\n", 
-		__func__, tas58xx->is_muted, tas58xx->vol, db_value, tas58xx->gain, db_gain);
-
 	SET_BOOK_AND_PAGE(rm, TAS58XX_BOOK_CONTROL_PORT, TAS58XX_REG_PAGE_0);
+
+	regmap_read(rm, TAS58XX_REG_VOL_CTRL, &t);
+	if(t!=tas58xx->vol) {
+		dev_dbg(&tas58xx->i2c->dev, "%s: is_muted=%d, vol=0x%02x (%ddB), gain=0x%02x (%ddB)\n", 
+			__func__, tas58xx->is_muted, tas58xx->vol, db_value, tas58xx->gain, db_gain);
+	}
 
 	/* Validate fault states */
 	regmap_read(rm, TAS58XX_REG_CHAN_FAULT, &chan);
@@ -314,51 +890,65 @@ static void tas58xx_refresh(struct tas58xx_priv *tas58xx)
 	tas58xx_decode_faults(&tas58xx->i2c->dev, chan, global1, global2, ot_warning);
 
 	if (chan != 0 || global1 != 0 || global2 != 0 || ot_warning != 0) {
+#if defined(DEBUG) && DEBUG>=2
 		dev_warn(&tas58xx->i2c->dev, "%s: fault detected: CHAN=0x%02x, GLOBAL1=0x%02x, GLOBAL2=0x%02x, OT_WARNING=0x%02x\n",
 			__func__, chan, global1, global2, ot_warning);
 
 		/* Optionally, we could take further action here, such as muting the device */
 		dev_dbg(&tas58xx->i2c->dev, "%s: clearing faults\n",
 			__func__);
+#endif
 		regmap_write(rm, TAS58XX_REG_FAULT, TAS58XX_ANALOG_FAULT_CLEAR);
 	}
 
 	/* Write hardware volume register. Applies to both channels.
 	 * Register value 0x00=+24dB, 0x30=0dB, 0xFE=-103dB, 0xFF=Mute
 	 */
-	dev_dbg(&tas58xx->i2c->dev, "%s: writing volume reg 0x%02x\n",
+	regmap_read(rm, TAS58XX_REG_VOL_CTRL, &t);
+	if(t!=tas58xx->vol) {
+		dev_dbg(&tas58xx->i2c->dev, "%s: writing volume reg 0x%02x\n",
 				__func__, tas58xx->vol);
-	regmap_write(rm, TAS58XX_REG_VOL_CTRL, tas58xx->vol);
+		regmap_write(rm, TAS58XX_REG_VOL_CTRL, tas58xx->vol);
+	}
 
 	/* Write analog gain register
 	 * Register value 0=0dB, 31=-15.5dB, 0.5dB steps
 	 */
-	dev_dbg(&tas58xx->i2c->dev, "%s: writing analog gain reg 0x%02x\n",
+	regmap_read(rm, TAS58XX_REG_ANALOG_GAIN, &t);
+	if(t!=tas58xx->gain) {
+		dev_dbg(&tas58xx->i2c->dev, "%s: writing analog gain reg 0x%02x\n",
 				__func__, tas58xx->gain);
-	regmap_write(rm, TAS58XX_REG_ANALOG_GAIN, tas58xx->gain);
+		regmap_write(rm, TAS58XX_REG_ANALOG_GAIN, tas58xx->gain);
+	}
 
 	/* Write device control 1 register (modulation, switching freq, bridge mode)
 	 * Combine: modulation_mode (bits 1:0), bridge_mode (bit 2), switch_freq (bits 6:4)
 	 */
-	dev_dbg(&tas58xx->i2c->dev, "%s: modulation_mode=%u, bridge_mode=%u, switch_freq=%u, eq_mode=%u\n",
+	unsigned int dctrl1_value = (tas58xx->modulation_mode & 0x3) |
+				   ((tas58xx->bridge_mode & 0x1) << 2) |
+				   ((tas58xx->switch_freq & 0x7) << 4);
+	regmap_read(rm, TAS58XX_REG_DEVICE_CTRL_1, &t);
+	if(t!=dctrl1_value) {
+		dev_dbg(&tas58xx->i2c->dev, "%s: modulation_mode=%u, bridge_mode=%u, switch_freq=%u, eq_mode=%u\n",
 				__func__, tas58xx->modulation_mode,
 				tas58xx->bridge_mode,
 				tas58xx->switch_freq,
 				tas58xx->eq_mode);
-	unsigned int dctrl1_value = (tas58xx->modulation_mode & 0x3) |
-							   ((tas58xx->bridge_mode & 0x1) << 2) |
-							   ((tas58xx->switch_freq & 0x7) << 4);
-	dev_dbg(&tas58xx->i2c->dev, "%s: writing device ctrl 1 reg 0x%02x\n",
+		dev_dbg(&tas58xx->i2c->dev, "%s: writing device ctrl 1 reg 0x%02x\n",
 				__func__, dctrl1_value);
-	regmap_write(rm, TAS58XX_REG_DEVICE_CTRL_1, dctrl1_value);
+		regmap_write(rm, TAS58XX_REG_DEVICE_CTRL_1, dctrl1_value);
+	}
 
 	/* Write DSP misc register (EQ enable/disable)
 	 * bit 0 controls EQ
 	 */
 	if (tas58xx->variant == TAS5805M) {
-		dev_dbg(&tas58xx->i2c->dev, "%s: writing dsp misc reg 0x%02x\n",
+		regmap_read(rm, TAS5805M_REG_DSP_MISC, &t);
+		if(t!=(tas58xx->eq_mode & 0x1)) {
+			dev_dbg(&tas58xx->i2c->dev, "%s: writing dsp misc reg 0x%02x\n",
 					__func__, tas58xx->eq_mode);
-		regmap_write(rm, TAS5805M_REG_DSP_MISC, tas58xx->eq_mode & 0x1);
+			regmap_write(rm, TAS5805M_REG_DSP_MISC, tas58xx->eq_mode & 0x1);
+		}
 	} else if (tas58xx->variant == TAS5825M) {
 		SET_BOOK_AND_PAGE(rm, TAS5825M_BOOK_5, TAS5825M_BOOK_5_EQ_PAGE);
 
@@ -380,21 +970,23 @@ static void tas58xx_refresh(struct tas58xx_priv *tas58xx)
 	if (tas58xx->variant == TAS5805M) {
 		SET_BOOK_AND_PAGE(rm, TAS5805M_BOOK_5, TAS5805M_BOOK_5_MIXER_PAGE);
 		
+#if defined(DEBUG) && DEBUG>=2
 		dev_dbg(&tas58xx->i2c->dev, "%s: mixer gains: L2L=%ddB, R2L=%ddB, L2R=%ddB, R2R=%ddB\n",
-					__func__, tas58xx->mixer_l2l, tas58xx->mixer_r2l,
-					tas58xx->mixer_l2r, tas58xx->mixer_r2r);
-
+				__func__, tas58xx->mixer_l2l, tas58xx->mixer_r2l,
+				tas58xx->mixer_l2r, tas58xx->mixer_r2r);
+#endif
 		tas58xx_map_db_to_9_23(tas58xx->mixer_l2l, mixer_buf);
 		regmap_bulk_write(rm, TAS5805M_REG_LEFT_TO_LEFT_GAIN, mixer_buf, 4);
-		
+
 		tas58xx_map_db_to_9_23(tas58xx->mixer_r2l, mixer_buf);
 		regmap_bulk_write(rm, TAS5805M_REG_RIGHT_TO_LEFT_GAIN, mixer_buf, 4);
-		
+
 		tas58xx_map_db_to_9_23(tas58xx->mixer_l2r, mixer_buf);
 		regmap_bulk_write(rm, TAS5805M_REG_LEFT_TO_RIGHT_GAIN, mixer_buf, 4);
-		
+
 		tas58xx_map_db_to_9_23(tas58xx->mixer_r2r, mixer_buf);
 		regmap_bulk_write(rm, TAS5805M_REG_RIGHT_TO_RIGHT_GAIN, mixer_buf, 4);
+
 	} else if (tas58xx->variant == TAS5825M) {
 		SET_BOOK_AND_PAGE(rm, TAS5825M_BOOK_5, TAS5825M_BOOK_5_MIXER_PAGE);
 		
@@ -421,9 +1013,10 @@ static void tas58xx_refresh(struct tas58xx_priv *tas58xx)
 	if (tas58xx->variant == TAS5805M) {
 		SET_BOOK_AND_PAGE(rm, TAS5805M_BOOK_5, TAS5805M_BOOK_5_VOLUME_PAGE);
 		
+#if defined(DEBUG) && DEBUG>=2
 		dev_dbg(&tas58xx->i2c->dev, "%s: channel volumes: Left=%ddB, Right=%ddB\n",
 					__func__, tas58xx->volume_left, tas58xx->volume_right);
-
+#endif
 		tas58xx_map_db_to_9_23(tas58xx->volume_left, mixer_buf);
 		regmap_bulk_write(rm, TAS5805M_REG_LEFT_VOLUME, mixer_buf, 4);
 		
@@ -521,7 +1114,9 @@ static void tas58xx_refresh(struct tas58xx_priv *tas58xx)
 			regmap_write(rm, reg_value->offset, reg_value->value);
 		}
 	} else {
+#if defined(DEBUG) && DEBUG>=2
 		dev_dbg(&tas58xx->i2c->dev, "%s: EQ mode is OFF\n", __func__);
+#endif
 	}
 
 	/* Return to control port page 0 */	
@@ -530,9 +1125,14 @@ static void tas58xx_refresh(struct tas58xx_priv *tas58xx)
 	/* Set/clear digital soft-mute */
 	uint8_t device_state = (tas58xx->is_muted ? TAS58XX_DCTRL2_MUTE : 0) |
 			TAS58XX_DCTRL2_MODE_PLAY;
-	dev_dbg(&tas58xx->i2c->dev, "%s: writing device state 0x%02x\n",
+	regmap_read(rm, TAS58XX_REG_DEVICE_CTRL_2, &t);
+	if(t!=device_state) {
+		dev_dbg(&tas58xx->i2c->dev, "%s: writing device state 0x%02x\n",
 				__func__, device_state);
-	regmap_write(rm, TAS58XX_REG_DEVICE_CTRL_2, device_state);
+		regmap_write(rm, TAS58XX_REG_DEVICE_CTRL_2, device_state);
+	}
+
+	tas58xx_dump_regs(tas58xx);
 }
 
 static int tas58xx_vol_info(struct snd_kcontrol *kcontrol,
