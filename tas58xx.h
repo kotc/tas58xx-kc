@@ -95,9 +95,11 @@
  *   0xFF = Mute
  * Hardware step is 0.5 dB, we expose 1.0 dB steps to ALSA
  */
-#define TAS58XX_VOLUME_MAX	0x00  /* +24 dB */
-#define TAS58XX_VOLUME_MIN	0xFE  /* -103 dB */
+// #define TAS58XX_VOLUME_MAX	0x00  /* +24 dB */
+// #define TAS58XX_VOLUME_MIN	0xFE  /* -103 dB */
 #define TAS58XX_VOLUME_ZERO_DB	0x30  /* 0 dB */
+#define TAS58XX_VOLUME_MAX	0x30  /* 0 dB */
+#define TAS58XX_VOLUME_MIN	0xFF  /* Mute */
 
 #define TAS58XX_AGAIN_MAX 0x00
 #define TAS58XX_AGAIN_MIN 0x1F

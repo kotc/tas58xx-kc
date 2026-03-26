@@ -1141,9 +1141,10 @@ static int tas58xx_vol_info(struct snd_kcontrol *kcontrol,
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 1;
 
-	/* ALSA range: 0 (min) to 127 (max), 1dB steps */
-	uinfo->value.integer.min = TAS58XX_VOLUME_MAX;
-	uinfo->value.integer.max = TAS58XX_VOLUME_MIN / 2;
+	// ALSA range: 0 (min) to 100 (max)
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 100;
+
 	return 0;
 }
 
@@ -1157,16 +1158,11 @@ static int tas58xx_vol_get(struct snd_kcontrol *kcontrol,
 
 	mutex_lock(&tas58xx->lock);
 	/* Invert and convert: hardware has 0.5dB steps, ALSA gets 1dB steps */
-	ucontrol->value.integer.value[0] = (TAS58XX_VOLUME_MIN - tas58xx->vol) / 2;
+	if (tas58xx->vol == 0xff) ucontrol->value.integer.value[0] = 0; else
+	ucontrol->value.integer.value[0] = ( (TAS58XX_VOLUME_MAX + 100 * 2) - tas58xx->vol ) / 2;
 	mutex_unlock(&tas58xx->lock);
 
 	return 0;
-}
-
-static inline int volume_is_valid(int v)
-{
-	/* ALSA range: 0 to 127 (1dB steps, hardware 0xFE-0x00 is 254 steps of 0.5dB) */
-	return (v >= 0) && (v <= (TAS58XX_VOLUME_MIN / 2));
 }
 
 static int tas58xx_vol_put(struct snd_kcontrol *kcontrol,
@@ -1183,11 +1179,14 @@ static int tas58xx_vol_put(struct snd_kcontrol *kcontrol,
 	dev_dbg(component->dev, "%s: alsa_vol=%d\n", 
 		__func__, alsa_vol);
 
-	if (!volume_is_valid(alsa_vol))
-		return -EINVAL;
+	if (alsa_vol > 100) alsa_vol = 100;
+	else if (alsa_vol < 0) alsa_vol = 0;
 
 	/* Convert ALSA 1dB steps to hardware 0.5dB steps and invert */
-	hw_vol = TAS58XX_VOLUME_MIN - (alsa_vol * 2);
+
+	// alsa -> hw: (min) 0 -> 0xff .. (max) 100 -> 0x30
+	if (alsa_vol == 0) hw_vol = TAS58XX_VOLUME_MIN; else
+	hw_vol = (TAS58XX_VOLUME_MAX + 100 * 2) - alsa_vol * 2;
 
 	mutex_lock(&tas58xx->lock);
 	if (tas58xx->vol != hw_vol) {
@@ -1206,6 +1205,9 @@ static int tas58xx_vol_put(struct snd_kcontrol *kcontrol,
 
 	return ret;
 }
+
+/* TLV for digital volume control: Mute,-99dB to 0dB, in 1dB steps +mute (100 steps, 0-100) */
+static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(tas58xx_vol_tlv, -10000, 100, 1);
 
 static int tas58xx_again_info(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_info *uinfo)
@@ -1227,7 +1229,9 @@ static int tas58xx_again_get(struct snd_kcontrol *kcontrol,
 
 	mutex_lock(&tas58xx->lock);
 	/* Invert: register TAS58XX_AGAIN_MAX (0dB) -> control 31, register TAS58XX_AGAIN_MIN (-15.5dB) -> control 0 */
-	ucontrol->value.integer.value[0] = TAS58XX_AGAIN_MIN - (tas58xx->gain & TAS58XX_AGAIN_MIN);
+
+	// hw -> alsa: (min) 0x1f -> 0 .. (max) 0x00 -> 0x1f
+	ucontrol->value.integer.value[0] = (TAS58XX_AGAIN_MIN + TAS58XX_AGAIN_MAX) - tas58xx->gain;
 	mutex_unlock(&tas58xx->lock);
 
 	return 0;
@@ -1244,11 +1248,13 @@ static int tas58xx_again_put(struct snd_kcontrol *kcontrol,
 	unsigned int reg_value;
 	int ret = 0;
 
-	if (control_value > TAS58XX_AGAIN_MIN)
-		return -EINVAL;
+	if (control_value > TAS58XX_AGAIN_MIN) control_value = TAS58XX_AGAIN_MIN;
+	else if(control_value < TAS58XX_AGAIN_MAX) control_value = TAS58XX_AGAIN_MAX;
 
 	/* Invert: control 31 (0dB) -> register TAS58XX_AGAIN_MAX, control 0 (-15.5dB) -> register TAS58XX_AGAIN_MIN */
-	reg_value = TAS58XX_AGAIN_MIN - control_value;
+
+	// alsa -> hw: 0 -> 0x1f .. 0x1f -> 0x00
+	reg_value = (TAS58XX_AGAIN_MIN + TAS58XX_AGAIN_MAX) - control_value;
 
 	mutex_lock(&tas58xx->lock);
 	
@@ -1722,10 +1728,11 @@ static const struct snd_kcontrol_new tas58xx_snd_controls_base[] = {
 		.info	= tas58xx_vol_info,
 		.get	= tas58xx_vol_get,
 		.put	= tas58xx_vol_put,
+		.tlv.p	= tas58xx_vol_tlv,
 	},
 	{
 		.iface	= SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name	= "Analog Gain",
+		.name	= "Analog Volume",
 		.access	= SNDRV_CTL_ELEM_ACCESS_TLV_READ |
 			  SNDRV_CTL_ELEM_ACCESS_READWRITE,
 		.info	= tas58xx_again_info,
@@ -2028,8 +2035,16 @@ static struct snd_soc_dai_driver tas58xx_dai = {
 		.stream_name	= "Playback",
 		.channels_min	= 2,
 		.channels_max	= 2,
-		.rates		= SNDRV_PCM_RATE_48000,
-		.formats	= SNDRV_PCM_FMTBIT_S32_LE,
+		.rates		= SNDRV_PCM_RATE_48000
+				| SNDRV_PCM_RATE_44100
+				| SNDRV_PCM_RATE_32000
+				| SNDRV_PCM_RATE_96000
+				| SNDRV_PCM_RATE_16000
+				| SNDRV_PCM_RATE_8000,
+		.formats	= SNDRV_PCM_FMTBIT_S32_LE
+				| SNDRV_PCM_FMTBIT_S24_LE
+				| SNDRV_PCM_FMTBIT_S20_LE
+				| SNDRV_PCM_FMTBIT_S16_LE,
 	},
 	.ops		= &tas58xx_dai_ops,
 };
@@ -2513,5 +2528,6 @@ module_i2c_driver(tas58xx_i2c_driver);
 MODULE_AUTHOR("Andy Liu <andy-liu@ti.com>");
 MODULE_AUTHOR("Daniel Beer <daniel.beer@igorinstitute.com>");
 MODULE_AUTHOR("Andriy Malyshenko <andriy@sonocotta.com>");
+MODULE_AUTHOR("KotCzarny <tjosko@yahoo.com>");
 MODULE_DESCRIPTION("TAS58XX Audio Amplifier Driver");
 MODULE_LICENSE("GPL v2");
